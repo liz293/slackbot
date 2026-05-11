@@ -8,7 +8,9 @@ Required env vars:
     SLACK_CHANNEL             Channel name or ID to post to
 
 Optional env vars:
-    WORKSHEET_NAME            Worksheet tab name (default: first sheet)
+    WORKSHEET_NAME            Worksheet tab name (takes priority over GID)
+    WORKSHEET_GID             Worksheet numeric GID from the URL (e.g. 768021914)
+                              Falls back to the first tab if neither is set.
     SCHEDULE_INTERVAL_MINUTES How often to post in minutes (default: 60)
 """
 
@@ -54,17 +56,29 @@ def build_sheets_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
+def _find_worksheet(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
+    """Resolve the target worksheet by name, GID, or index 0 (in that priority)."""
+    name = os.environ.get("WORKSHEET_NAME")
+    if name:
+        return spreadsheet.worksheet(name)
+
+    gid = os.environ.get("WORKSHEET_GID")
+    if gid:
+        gid_int = int(gid)
+        for ws in spreadsheet.worksheets():
+            if ws.id == gid_int:
+                return ws
+        raise ValueError(f"No worksheet with GID {gid} found in spreadsheet.")
+
+    return spreadsheet.get_worksheet(0)
+
+
 def read_metrics(client: gspread.Client) -> list[dict]:
     """Return all rows from the target worksheet as a list of dicts (header row → keys)."""
     sheet_id = _require_env("SHEET_ID")
-    worksheet_name = os.environ.get("WORKSHEET_NAME")
 
     spreadsheet = client.open_by_key(sheet_id)
-    ws = (
-        spreadsheet.worksheet(worksheet_name)
-        if worksheet_name
-        else spreadsheet.get_worksheet(0)
-    )
+    ws = _find_worksheet(spreadsheet)
 
     records = ws.get_all_records()
     log.info("Read %d row(s) from worksheet '%s'.", len(records), ws.title)
