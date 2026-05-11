@@ -73,16 +73,45 @@ def _find_worksheet(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
     return spreadsheet.get_worksheet(0)
 
 
-def read_metrics(client: gspread.Client) -> list[dict]:
-    """Return all rows from the target worksheet as a list of dicts (header row → keys)."""
+def read_metrics(client: gspread.Client) -> tuple[str, list[dict]]:
+    """Return (worksheet_title, rows) using raw values to handle duplicate/empty headers.
+
+    Columns with blank headers are skipped (they're visual spacers in the sheet).
+    Duplicate header names get a numeric suffix (_2, _3, …).
+    Only rows that have at least one non-empty cell are returned.
+    """
     sheet_id = _require_env("SHEET_ID")
 
     spreadsheet = client.open_by_key(sheet_id)
     ws = _find_worksheet(spreadsheet)
 
-    records = ws.get_all_records()
+    all_values = ws.get_all_values()
+    if not all_values:
+        return ws.title, []
+
+    raw_headers = all_values[0]
+
+    # Columns whose header is blank are spacers — skip them entirely.
+    active_cols = [i for i, h in enumerate(raw_headers) if h.strip()]
+
+    # Deduplicate: "SMS Spend" appearing twice → "SMS Spend", "SMS Spend_2"
+    seen: dict[str, int] = {}
+    headers: list[str] = []
+    for i in active_cols:
+        h = raw_headers[i]
+        count = seen.get(h, 0) + 1
+        seen[h] = count
+        headers.append(h if count == 1 else f"{h}_{count}")
+
+    records: list[dict] = []
+    for row in all_values[1:]:
+        padded = row + [""] * max(0, len(raw_headers) - len(row))
+        values = [padded[i] for i in active_cols]
+        if any(v.strip() for v in values):
+            records.append(dict(zip(headers, values)))
+
     log.info("Read %d row(s) from worksheet '%s'.", len(records), ws.title)
-    return records
+    return ws.title, records
 
 
 
@@ -98,8 +127,8 @@ def post_to_slack(client: WebClient, message: str) -> None:
 
 def run_once(sheets_client: gspread.Client, slack_client: WebClient) -> None:
     log.info("Fetching metrics from Google Sheets…")
-    records = read_metrics(sheets_client)
-    message = format_message(records)
+    title, records = read_metrics(sheets_client)
+    message = format_message(title, records)
     log.info("Posting to Slack…")
     post_to_slack(slack_client, message)
     log.info("Done.")
